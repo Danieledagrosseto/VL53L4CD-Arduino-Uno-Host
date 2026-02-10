@@ -1,0 +1,17 @@
+# Arduino build artifacts
+*.elf
+*.hex
+*.bin
+*.map
+*.o
+*.d
+
+# Arduino CLI
+.arduino15/
+
+# Build output
+build/
+
+# VS Code
+.vscode/*.local
+.vscode/*.log

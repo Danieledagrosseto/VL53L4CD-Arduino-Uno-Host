@@ -1,0 +1,6 @@
+{
+  "arduino.useArduinoCli": true,
+  "arduino.defaultBoard": "arduino:avr:uno",
+  "arduino.defaultPort": "COM7",
+  "arduino.defaultSketch": "${workspaceFolder}/src/VL53L4CD_Host"
+}
