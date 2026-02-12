@@ -1,3 +1,508 @@
-void setup() {}
+#include <Arduino.h>
+#include <Wire.h>
+#include <ctype.h>
 
-void loop() {}
+static bool i2cWriteBytes(uint8_t addr, const uint8_t *data, uint8_t len) {
+	Wire.beginTransmission(addr);
+	for (uint8_t i = 0; i < len; ++i) {
+		Wire.write(data[i]);
+	}
+	return (Wire.endTransmission() == 0);
+}
+
+static bool i2cReadBytes(uint8_t addr, uint8_t *data, uint8_t len) {
+	Wire.requestFrom(addr, len);
+	uint8_t idx = 0;
+	while (Wire.available() && idx < len) {
+		data[idx++] = Wire.read();
+	}
+	return (idx == len);
+}
+
+static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
+	const uint8_t cmd = 0x04;
+	if (!i2cWriteBytes(addr, &cmd, 1)) {
+		return false;
+	}
+	// Give the sensor time to prepare the response.
+	delay(5);
+	return i2cReadBytes(addr, cfg, len);
+}
+
+static uint16_t readU16Be(const uint8_t *buf, uint8_t msbIndex) {
+	return static_cast<uint16_t>(buf[msbIndex] << 8) | buf[msbIndex + 1];
+}
+
+static int16_t readS16Be(const uint8_t *buf, uint8_t msbIndex) {
+	return static_cast<int16_t>(readU16Be(buf, msbIndex));
+}
+
+static void printConfigFields(uint8_t addr, const uint8_t *cfg, uint8_t len) {
+	if (len < 13) {
+		Serial.println(F("Config buffer too small."));
+		return;
+	}
+
+	const uint8_t storedAddress = cfg[0];
+	const uint8_t timeBudgetMs = cfg[1];
+	const uint16_t interMeasurementMs = readU16Be(cfg, 2);
+	const int16_t offsetMm = readS16Be(cfg, 4);
+	const uint16_t xtalkKcps = readU16Be(cfg, 6);
+	const uint16_t sigmaThresholdMm = readU16Be(cfg, 8);
+	const uint16_t signalThresholdKcps = readU16Be(cfg, 10);
+	const uint8_t firmwareRev = cfg[12];
+
+	Serial.print(F("Device at 0x"));
+	Serial.print(addr, HEX);
+	Serial.print(F(" | stored: 0x"));
+	Serial.print(storedAddress, HEX);
+	Serial.print(F(" | firmware: "));
+	Serial.println(firmwareRev);
+	Serial.print(F("Time budget (ms): "));
+	Serial.println(timeBudgetMs);
+	Serial.print(F("Inter-measurement (ms): "));
+	Serial.println(interMeasurementMs);
+	Serial.print(F("Offset (mm): "));
+	Serial.println(offsetMm);
+	Serial.print(F("XTalk (kcps): "));
+	Serial.println(xtalkKcps);
+	Serial.print(F("Sigma threshold (mm): "));
+	Serial.println(sigmaThresholdMm);
+	Serial.print(F("Signal threshold (kcps): "));
+	Serial.println(signalThresholdKcps);
+}
+
+static bool printConfigForAddress(uint8_t addr) {
+	uint8_t cfg[13] = {0};
+	if (!readConfig(addr, cfg, sizeof(cfg))) {
+		return false;
+	}
+
+	printConfigFields(addr, cfg, sizeof(cfg));
+	return true;
+}
+
+static size_t readLine(char *buf, size_t len) {
+	if (len == 0) {
+		return 0;
+	}
+	size_t n = 0;
+	while (true) {
+		if (!Serial.available()) {
+			continue;
+		}
+		char c = static_cast<char>(Serial.read());
+		if (c == '\n') {
+			break;
+		}
+		if (c == '\r') {
+			continue;
+		}
+		if (n < len - 1) {
+			buf[n++] = c;
+		}
+	}
+	buf[n] = '\0';
+	return n;
+}
+
+static bool parseU16(const char *text, uint16_t minValue, uint16_t maxValue, uint16_t *valueOut) {
+	if (text == nullptr || valueOut == nullptr) {
+		return false;
+	}
+
+	char *end = nullptr;
+	unsigned long value = strtoul(text, &end, 0);
+	if (end == text || *end != '\0' || value < minValue || value > maxValue) {
+		return false;
+	}
+
+	*valueOut = static_cast<uint16_t>(value);
+	return true;
+}
+
+static bool promptForU16(const __FlashStringHelper *prompt, uint16_t minValue, uint16_t maxValue, uint16_t *valueOut) {
+	Serial.println(prompt);
+	char buf[24] = {0};
+	if (readLine(buf, sizeof(buf)) == 0) {
+		return false;
+	}
+	if (!parseU16(buf, minValue, maxValue, valueOut)) {
+		Serial.println(F("Invalid value."));
+		return false;
+	}
+	return true;
+}
+
+static bool parseI2cAddress(const char *text, uint8_t *addrOut) {
+	if (text == nullptr || addrOut == nullptr) {
+		return false;
+	}
+
+	if (!(text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))) {
+		return false;
+	}
+
+	char *end = nullptr;
+	unsigned long value = strtoul(text + 2, &end, 16);
+	if (end == text + 2 || *end != '\0' || value < 0x08 || value > 0x7F) {
+		return false;
+	}
+
+	*addrOut = static_cast<uint8_t>(value);
+	return true;
+}
+
+static bool promptForAddress(uint8_t *addrOut) {
+	Serial.println(F("Enter VL53L4CD I2C address in 0x format (e.g., 0x29), then press Enter:"));
+
+	char buf[16] = {0};
+	if (readLine(buf, sizeof(buf)) == 0) {
+		return false;
+	}
+
+	if (!parseI2cAddress(buf, addrOut)) {
+		Serial.println(F("Invalid I2C address. Use 0x08-0x7F."));
+		return false;
+	}
+
+	return true;
+}
+
+static bool promptForI2cAddressPair(uint8_t *oldAddr, uint8_t *newAddr) {
+	Serial.println(F("Enter current I2C address in 0x format (e.g., 0x70):"));
+	char buf[16] = {0};
+	if (readLine(buf, sizeof(buf)) == 0 || !parseI2cAddress(buf, oldAddr)) {
+		Serial.println(F("Invalid current address."));
+		return false;
+	}
+	Serial.println(F("Enter new I2C address in 0x format (0x08-0x7F):"));
+	if (readLine(buf, sizeof(buf)) == 0 || !parseI2cAddress(buf, newAddr)) {
+		Serial.println(F("Invalid new address."));
+		return false;
+	}
+	return true;
+}
+
+static bool promptForUnitCode(uint8_t *unitOut) {
+	Serial.println(F("Enter unit code: 0x52 (mm), 0x51 (cm), 0x50 (inch)."));
+	char buf[16] = {0};
+	if (readLine(buf, sizeof(buf)) == 0) {
+		return false;
+	}
+	uint16_t value = 0;
+	if (!parseU16(buf, 0x50, 0x52, &value)) {
+		Serial.println(F("Invalid unit code."));
+		return false;
+	}
+	*unitOut = static_cast<uint8_t>(value);
+	return true;
+}
+
+static bool promptForDelayMs(uint16_t *delayMsOut) {
+	return promptForU16(F("Enter delay in ms before reading (e.g., 60):"), 0, 60000, delayMsOut);
+}
+
+static void printRangingResult(const uint8_t *buf, uint8_t len) {
+	if (len < 15) {
+		Serial.println(F("Ranging buffer too small."));
+		return;
+	}
+	const uint16_t distance = readU16Be(buf, 0);
+	const uint8_t rangeStatus = buf[2];
+	Serial.print(F("Distance: "));
+	Serial.println(distance);
+	Serial.print(F("Range status: "));
+	Serial.println(rangeStatus);
+	Serial.print(F("Signal rate: "));
+	Serial.println(readU16Be(buf, 3));
+	Serial.print(F("Ambient rate: "));
+	Serial.println(readU16Be(buf, 5));
+	Serial.print(F("Sigma: "));
+	Serial.println(readU16Be(buf, 7));
+	Serial.print(F("Ambient per spad: "));
+	Serial.println(readU16Be(buf, 9));
+	Serial.print(F("Signal per spad: "));
+	Serial.println(readU16Be(buf, 11));
+	Serial.print(F("Number of spads: "));
+	Serial.println(readU16Be(buf, 13));
+}
+
+static void runRanging() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint8_t unit = 0;
+	if (!promptForUnitCode(&unit)) {
+		return;
+	}
+	uint16_t delayMs = 0;
+	if (!promptForDelayMs(&delayMs)) {
+		return;
+	}
+
+	uint8_t cmd[2] = {0x00, unit};
+	if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
+		Serial.println(F("Failed to send ranging command."));
+		return;
+	}
+	if (delayMs > 0) {
+		delay(delayMs);
+	}
+	uint8_t buf[15] = {0};
+	if (!i2cReadBytes(addr, buf, sizeof(buf))) {
+		Serial.println(F("Failed to read ranging result."));
+		return;
+	}
+	printRangingResult(buf, sizeof(buf));
+}
+
+static void runSetTiming() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint16_t timeBudget = 0;
+	if (!promptForU16(F("Enter time budget in ms (10-200):"), 10, 200, &timeBudget)) {
+		return;
+	}
+	uint16_t interMs = 0;
+	if (!promptForU16(F("Enter inter-measurement in ms (0-5000):"), 0, 5000, &interMs)) {
+		return;
+	}
+
+	uint8_t cmd[4] = {0x01, static_cast<uint8_t>(timeBudget),
+		static_cast<uint8_t>(interMs >> 8), static_cast<uint8_t>(interMs)};
+	if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
+		Serial.println(F("Failed to set timing."));
+		return;
+	}
+	Serial.println(F("Timing updated."));
+}
+
+static void runOffsetCalibration() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint16_t distance = 0;
+	if (!promptForU16(F("Enter target distance in mm (10-1000):"), 10, 1000, &distance)) {
+		return;
+	}
+	uint16_t samples = 0;
+	if (!promptForU16(F("Enter sample count (5-255):"), 5, 255, &samples)) {
+		return;
+	}
+
+	uint8_t cmd[5] = {0x02, static_cast<uint8_t>(distance >> 8), static_cast<uint8_t>(distance),
+		static_cast<uint8_t>(samples >> 8), static_cast<uint8_t>(samples)};
+	if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
+		Serial.println(F("Failed to start offset calibration."));
+		return;
+	}
+	Serial.println(F("Offset calibration started."));
+}
+
+static void runXtalkCalibration() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint16_t distance = 0;
+	if (!promptForU16(F("Enter target distance in mm (10-5000):"), 10, 5000, &distance)) {
+		return;
+	}
+	uint16_t samples = 0;
+	if (!promptForU16(F("Enter sample count (5-255):"), 5, 255, &samples)) {
+		return;
+	}
+
+	uint8_t cmd[5] = {0x03, static_cast<uint8_t>(distance >> 8), static_cast<uint8_t>(distance),
+		static_cast<uint8_t>(samples >> 8), static_cast<uint8_t>(samples)};
+	if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
+		Serial.println(F("Failed to start xtalk calibration."));
+		return;
+	}
+	Serial.println(F("XTalk calibration started."));
+}
+
+static void runRestoreDefaults() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint8_t cmd = 0x05;
+	if (!i2cWriteBytes(addr, &cmd, 1)) {
+		Serial.println(F("Failed to restore defaults."));
+		return;
+	}
+	Serial.println(F("Defaults restored."));
+}
+
+static void runSigmaSignalThresholds() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint16_t sigma = 0;
+	if (!promptForU16(F("Enter sigma threshold (mm):"), 0, 65535, &sigma)) {
+		return;
+	}
+	uint16_t signal = 0;
+	if (!promptForU16(F("Enter signal threshold (kcps):"), 0, 65535, &signal)) {
+		return;
+	}
+
+	uint8_t cmd[5] = {0x07, static_cast<uint8_t>(sigma >> 8), static_cast<uint8_t>(sigma),
+		static_cast<uint8_t>(signal >> 8), static_cast<uint8_t>(signal)};
+	if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
+		Serial.println(F("Failed to update thresholds."));
+		return;
+	}
+	Serial.println(F("Thresholds updated."));
+}
+
+static void runRestart() {
+	uint8_t addr = 0;
+	if (!promptForAddress(&addr)) {
+		return;
+	}
+	uint8_t cmd = 0x08;
+	if (!i2cWriteBytes(addr, &cmd, 1)) {
+		Serial.println(F("Failed to restart device."));
+		return;
+	}
+	Serial.println(F("Restart command sent."));
+}
+
+static void runChangeAddress() {
+	uint8_t oldAddr = 0;
+	uint8_t newAddr = 0;
+	if (!promptForI2cAddressPair(&oldAddr, &newAddr)) {
+		return;
+	}
+	uint8_t s1[2] = {0x00, 0xA0};
+	uint8_t s2[2] = {0x00, 0xAA};
+	uint8_t s3[2] = {0x00, 0xA5};
+	uint8_t s4[2] = {0x00, newAddr};
+	if (!i2cWriteBytes(oldAddr, s1, sizeof(s1)) ||
+		!i2cWriteBytes(oldAddr, s2, sizeof(s2)) ||
+		!i2cWriteBytes(oldAddr, s3, sizeof(s3)) ||
+		!i2cWriteBytes(oldAddr, s4, sizeof(s4))) {
+		Serial.println(F("Failed to change I2C address."));
+		return;
+	}
+	Serial.print(F("Address changed to 0x"));
+	Serial.println(newAddr, HEX);
+}
+
+static void scanAndPrintConfigs() {
+	Serial.println(F("Scanning I2C bus for devices..."));
+	bool found = false;
+	for (uint8_t addr = 0x08; addr <= 0x7F; ++addr) {
+		Wire.beginTransmission(addr);
+		if (Wire.endTransmission() != 0) {
+			continue;
+		}
+		found = true;
+		if (!printConfigForAddress(addr)) {
+			Serial.print(F("Device at 0x"));
+			Serial.print(addr, HEX);
+			Serial.println(F(" did not return config."));
+		}
+	}
+	if (!found) {
+		Serial.println(F("No I2C devices found."));
+	}
+}
+
+static void printMenu() {
+	Serial.println();
+	Serial.println(F("Commands:"));
+	Serial.println(F("1) Scan I2C and print configs"));
+	Serial.println(F("2) Read config for one address"));
+	Serial.println(F("3) Ranging (single measurement)"));
+	Serial.println(F("4) Set timing"));
+	Serial.println(F("5) Offset calibration"));
+	Serial.println(F("6) XTalk calibration"));
+	Serial.println(F("7) Restore defaults"));
+	Serial.println(F("8) Sigma/signal thresholds"));
+	Serial.println(F("9) Restart"));
+	Serial.println(F("A) Change I2C address"));
+	Serial.println(F("H) Help (print commands)"));
+	Serial.print(F("Select command (1-9, A, H): "));
+}
+
+static void handleCommand(char cmd) {
+	switch (cmd) {
+		case '1':
+			scanAndPrintConfigs();
+			break;
+		case '2': {
+			uint8_t addr = 0;
+			if (!promptForAddress(&addr)) {
+				return;
+			}
+			if (!printConfigForAddress(addr)) {
+				Serial.println(F("Failed to read configuration."));
+			}
+			break;
+		}
+		case '3':
+			runRanging();
+			break;
+		case '4':
+			runSetTiming();
+			break;
+		case '5':
+			runOffsetCalibration();
+			break;
+		case '6':
+			runXtalkCalibration();
+			break;
+		case '7':
+			runRestoreDefaults();
+			break;
+		case '8':
+			runSigmaSignalThresholds();
+			break;
+		case '9':
+			runRestart();
+			break;
+		case 'A':
+			runChangeAddress();
+			break;
+		case 'H':
+			printMenu();
+			break;
+		default:
+			Serial.println(F("Unknown command. Enter H for help."));
+			break;
+	}
+}
+
+void setup() {
+	Serial.begin(115200);
+	while (!Serial) {
+		;
+	}
+	// Allow 5 seconds after power-up before I2C activity.
+	delay(5000);
+	Wire.begin();
+	Wire.setClock(400000);
+	printMenu();
+}
+
+void loop() {
+	char buf[16] = {0};
+	if (readLine(buf, sizeof(buf)) == 0) {
+		return;
+	}
+	if (buf[0] == '\0') {
+		return;
+	}
+	char cmd = static_cast<char>(toupper(buf[0]));
+	handleCommand(cmd);
+	printMenu();
+}
