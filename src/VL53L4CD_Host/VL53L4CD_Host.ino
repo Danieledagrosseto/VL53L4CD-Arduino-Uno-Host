@@ -28,7 +28,7 @@ static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
 		return false;
 	}
 	// Give the sensor time to prepare the response.
-	delay(5);
+	delay(10);
 	return i2cReadBytes(addr, cfg, len);
 }
 
