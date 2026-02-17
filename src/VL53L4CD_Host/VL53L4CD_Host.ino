@@ -70,12 +70,17 @@ typedef struct {
 
 // Global variables
 SystemState g_state = STATE_IDLE;
-uint8_t g_dev_address = 0x29;  // Default VL53L4CD address
+uint8_t g_dev_address = 0x29;  // Current device address
 uint8_t g_selected_unit = MM;   // Default unit
 uint16_t g_repeat_delay_ms = 0;
 bool g_new_command = false;
 char g_rx_buffer[256] = {0};
 uint8_t g_rx_index = 0;
+
+// I2C device detection
+#define MAX_I2C_DEVICES 10
+uint8_t g_detected_devices[MAX_I2C_DEVICES] = {0};
+uint8_t g_num_devices = 0;
 
 // UART RX interrupt handler
 void serialEventRun(void) {
@@ -126,10 +131,13 @@ static uint8_t detectI2cSlave(void) {
 	return 0;
 }
 
-// Scan I2C addresses
+// Scan I2C addresses and store detected devices
 static void scanI2cAddresses(void) {
 	Serial.println(F("Scanning I2C bus (0x08 to 0x7F)..."));
 	Serial.println(F("     0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F"));
+	
+	g_num_devices = 0;
+	memset(g_detected_devices, 0, sizeof(g_detected_devices));
 	
 	uint8_t found_count = 0;
 	for (uint8_t address = 0; address <= 0x7F; address++) {
@@ -145,6 +153,9 @@ static void scanI2cAddresses(void) {
 			if (Wire.endTransmission() == 0) {
 				Serial.print(address, HEX);
 				Serial.print(F(" "));
+				if (g_num_devices < MAX_I2C_DEVICES) {
+					g_detected_devices[g_num_devices++] = address;
+				}
 				found_count++;
 			} else {
 				Serial.print(F("-- "));
@@ -252,24 +263,57 @@ static const char* unitLabel(uint8_t unit) {
 	}
 }
 
-// Request config
-static void requestConfig(void) {
+// List detected devices for selection
+static bool selectDeviceAddress(uint8_t *addr_out) {
+	if (g_num_devices == 0) {
+		Serial.println(F("No I2C devices detected."));
+		return false;
+	}
+	
+	Serial.println(F("Available I2C devices:"));
+	for (uint8_t i = 0; i < g_num_devices; i++) {
+		Serial.print(F("["));
+		Serial.print(i);
+		Serial.print(F("] 0x"));
+		Serial.println(g_detected_devices[i], HEX);
+	}
+	Serial.print(F("Select device (0-"));
+	Serial.print(g_num_devices - 1);
+	Serial.print(F("): "));
+	
+	char buf[16] = {0};
+	if (readLine(buf, sizeof(buf)) == 0) {
+		return false;
+	}
+	
+	uint16_t choice = 0;
+	if (!parseU16(buf, 0, g_num_devices - 1, &choice)) {
+		Serial.println(F("Invalid choice."));
+		return false;
+	}
+	
+	*addr_out = g_detected_devices[choice];
+	return true;
+}
+
+// Request config from device
+static void requestConfig(uint8_t dev_addr) {
 	uint8_t cfg[13] = {0};
 	uint8_t cmd = CMD_GET_CONFIG;
 	
-	if (!i2cWriteBytes(g_dev_address, &cmd, 1)) {
+	if (!i2cWriteBytes(dev_addr, &cmd, 1)) {
 		Serial.println(F("Failed to request config"));
 		return;
 	}
 	
 	delay(10);
-	if (!i2cReadBytes(g_dev_address, cfg, sizeof(cfg))) {
+	if (!i2cReadBytes(dev_addr, cfg, sizeof(cfg))) {
 		Serial.println(F("Failed to read config"));
 		return;
 	}
 	
 	Serial.print(F("Device at 0x"));
-	Serial.print(g_dev_address, HEX);
+	Serial.print(dev_addr, HEX);
 	Serial.println(F(" configuration:"));
 	Serial.print(F("  Stored address: 0x"));
 	Serial.println(cfg[0], HEX);
@@ -355,21 +399,65 @@ void setup() {
 	Wire.begin();
 	Wire.setClock(400000);
 	
-	// Auto-detect I2C slave
-	Serial.println(F("Scanning for I2C slave device..."));
-	uint8_t detected = detectI2cSlave();
-	if (detected != 0) {
-		g_dev_address = detected;
-		Serial.print(F("Found I2C slave at address: 0x"));
-		Serial.println(detected, HEX);
-	} else {
-		Serial.print(F("No I2C slave detected. Using default address: 0x"));
+	// Scan for all I2C devices
+	Serial.println(F("Scanning for I2C slave devices..."));
+	scanI2cAddresses();
+	if (g_num_devices > 0) {
+		g_dev_address = g_detected_devices[0];
+		Serial.print(F("Default device set to: 0x"));
 		Serial.println(g_dev_address, HEX);
+	} else {
+		Serial.println(F("No I2C devices detected. Please connect VL53L4CD."));
 	}
 	
 	g_state = STATE_IDLE;
 	delay(500);
 	printCommandMenu();
+}
+
+// Helper: Read a line from serial (waits up to 30 seconds for input)
+static uint8_t readLine(char *buffer, uint8_t max_len) {
+	uint8_t len = 0;
+	unsigned long timeout = millis() + 30000;  // 30 second timeout
+	
+	while (len < max_len - 1 && millis() < timeout) {
+		if (Serial.available()) {
+			char c = Serial.read();
+			if (c == '\n' || c == '\r') {
+				buffer[len] = '\0';
+				return len;
+			}
+			buffer[len++] = c;
+		}
+		delay(10);  // Small delay to prevent busy loop and allow other processing
+	}
+	buffer[len] = '\0';
+	return len;
+}
+
+// Helper: Parse unsigned 16-bit from string with bounds check
+static bool parseU16(const char *str, uint16_t min_val, uint16_t max_val, uint16_t *out) {
+	if (str == NULL || out == NULL) {
+		return false;
+	}
+	
+	uint32_t val = 0;
+	for (int i = 0; str[i] != '\0'; i++) {
+		if (str[i] < '0' || str[i] > '9') {
+			return false;
+		}
+		val = (val * 10) + (str[i] - '0');
+		if (val > 65535) {
+			return false;
+		}
+	}
+	
+	if (val < min_val || val > max_val) {
+		return false;
+	}
+	
+	*out = (uint16_t)val;
+	return true;
 }
 
 void loop() {
@@ -384,6 +472,10 @@ void loop() {
 				
 				switch (cmd_choice) {
 					case 0:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_SELECT_UNIT_SINGLE;
 						Serial.println(F("\nSelect unit:"));
 						Serial.println(F("1) Millimeters (mm)"));
@@ -392,6 +484,10 @@ void loop() {
 						Serial.print(F("Enter choice: "));
 						break;
 					case 1:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_SELECT_UNIT_CONTINUOUS;
 						Serial.println(F("\nSelect unit:"));
 						Serial.println(F("1) Millimeters (mm)"));
@@ -400,22 +496,42 @@ void loop() {
 						Serial.print(F("Enter choice: "));
 						break;
 					case 2:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_CHANGEADDR;
 						Serial.print(F("\nEnter new I2C address (hex, e.g. 0x29): "));
 						break;
 					case 3:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_CHANGE_TIMEBUDGET;
 						Serial.print(F("\nEnter time budget (10-200 ms): "));
 						break;
 					case 4:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_OFFSET_CAL_DISTANCE;
 						Serial.print(F("\nEnter calibration distance (10-1000 mm): "));
 						break;
 					case 5:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_XTALK_CAL_DISTANCE;
 						Serial.print(F("\nEnter calibration distance (10-5000 mm): "));
 						break;
 					case 6: {
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						Command save_cmd;
 						save_cmd.dev_address = g_dev_address;
 						save_cmd.command_id = CMD_SAVE_CONFIG;
@@ -425,6 +541,10 @@ void loop() {
 						break;
 					}
 					case 7: {
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						Command restore_cmd;
 						restore_cmd.dev_address = g_dev_address;
 						restore_cmd.command_id = CMD_RESTORE_FACTORY_CONFIG;
@@ -434,14 +554,26 @@ void loop() {
 						break;
 					}
 					case 8:
-						requestConfig();
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
+						requestConfig(g_dev_address);
 						printCommandMenu();
 						break;
 					case 9:
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						g_state = STATE_SET_THRESHOLD_SIGMA;
 						Serial.print(F("\nEnter sigma threshold (mm): "));
 						break;
 					case 10: {
+						if (!selectDeviceAddress(&g_dev_address)) {
+							printCommandMenu();
+							break;
+						}
 						Command restart_cmd;
 						restart_cmd.dev_address = g_dev_address;
 						restart_cmd.command_id = CMD_RESTART;
