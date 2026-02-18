@@ -77,6 +77,11 @@ bool g_new_command = false;
 char g_rx_buffer[256] = {0};
 uint8_t g_rx_index = 0;
 
+// Intermediate state variables (used across multiple state transitions)
+uint8_t g_temp_timebudget = 0;
+uint16_t g_temp_distance = 0;
+uint16_t g_temp_sigma = 0;
+
 // I2C device detection
 #define MAX_I2C_DEVICES 10
 uint8_t g_detected_devices[MAX_I2C_DEVICES] = {0};
@@ -263,6 +268,16 @@ static const char* unitLabel(uint8_t unit) {
 	}
 }
 
+// Clear any buffered serial input and pending command state.
+static void clearPendingSerialInput(void) {
+	while (Serial.available()) {
+		Serial.read();
+	}
+	g_new_command = false;
+	g_rx_index = 0;
+	g_rx_buffer[0] = '\0';
+}
+
 // List detected devices for selection
 static bool selectDeviceAddress(uint8_t *addr_out) {
 	if (g_num_devices == 0) {
@@ -283,16 +298,19 @@ static bool selectDeviceAddress(uint8_t *addr_out) {
 	
 	char buf[16] = {0};
 	if (readLine(buf, sizeof(buf)) == 0) {
+		clearPendingSerialInput();
 		return false;
 	}
 	
 	uint16_t choice = 0;
 	if (!parseU16(buf, 0, g_num_devices - 1, &choice)) {
 		Serial.println(F("Invalid choice."));
+		clearPendingSerialInput();
 		return false;
 	}
 	
 	*addr_out = g_detected_devices[choice];
+	clearPendingSerialInput();
 	return true;
 }
 
@@ -306,7 +324,7 @@ static void requestConfig(uint8_t dev_addr) {
 		return;
 	}
 	
-	delay(10);
+	delay(50);  // Give device time to prepare config data
 	if (!i2cReadBytes(dev_addr, cfg, sizeof(cfg))) {
 		Serial.println(F("Failed to read config"));
 		return;
@@ -358,6 +376,7 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 		return;
 	}
 	
+	delay(20);  // Give device time to process command
 	uint8_t range_data[15] = {0};
 	uint32_t attempts = 0;
 	const uint32_t max_attempts = 100;
@@ -666,6 +685,13 @@ void loop() {
 				unsigned long last_range_ms = 0;
 				while (true) {
 					serialEventRun();
+					if (g_new_command) {
+						g_new_command = false;
+						if ((g_rx_buffer[0] == 's' || g_rx_buffer[0] == 'S') && g_rx_buffer[1] == '\0') {
+							Serial.println(F("Continuous ranging stopped."));
+							break;
+						}
+					}
 					if (Serial.available()) {
 						char c = Serial.read();
 						if (c == 's' || c == 'S') {
@@ -718,8 +744,7 @@ void loop() {
 		case STATE_CHANGE_TIMEBUDGET:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint8_t stored_timebudget = 0;
-				stored_timebudget = atoi(g_rx_buffer);
+				g_temp_timebudget = atoi(g_rx_buffer);
 				
 				Serial.print(F("Enter inter-measurement time (0-5000 ms): "));
 				g_state = STATE_CHANGE_INTERMEASUREMENT;
@@ -729,17 +754,41 @@ void loop() {
 		case STATE_CHANGE_INTERMEASUREMENT:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint8_t stored_timebudget = 0;
 				uint16_t inter_time = atoi(g_rx_buffer);
+				
+				Serial.print(F("Debug: timebudget="));
+				Serial.print(g_temp_timebudget);
+				Serial.print(F(", inter_time="));
+				Serial.println(inter_time);
 				
 				Command timing_cmd;
 				timing_cmd.dev_address = g_dev_address;
 				timing_cmd.command_id = CMD_SET_RANGING_TIMING;
-				timing_cmd.data.set_timing.timebudget = stored_timebudget;
+				timing_cmd.data.set_timing.timebudget = g_temp_timebudget;
 				timing_cmd.data.set_timing.intermeasurementTime = inter_time;
 				
 				if (sendCommandI2c(&timing_cmd)) {
 					Serial.println(F("Timing updated."));
+					delay(100);  // Give device time to process timing change
+					
+					Command save_cmd;
+					save_cmd.dev_address = g_dev_address;
+					save_cmd.command_id = CMD_SAVE_CONFIG;
+					if (sendCommandI2c(&save_cmd)) {
+						Serial.println(F("Configuration saved."));
+					} else {
+						Serial.println(F("Failed to save configuration."));
+					}
+					delay(100);  // Give device time to save to EEPROM
+					
+					Command restart_cmd;
+					restart_cmd.dev_address = g_dev_address;
+					restart_cmd.command_id = CMD_RESTART;
+					if (sendCommandI2c(&restart_cmd)) {
+						Serial.println(F("Restart command sent."));
+					} else {
+						Serial.println(F("Failed to send restart command."));
+					}
 				} else {
 					Serial.println(F("Failed to update timing."));
 				}
@@ -752,8 +801,7 @@ void loop() {
 		case STATE_OFFSET_CAL_DISTANCE:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint16_t stored_distance = 0;
-				stored_distance = atoi(g_rx_buffer);
+				g_temp_distance = atoi(g_rx_buffer);
 				Serial.print(F("Enter sample count (5-255): "));
 				g_state = STATE_OFFSET_CAL_SAMPLES;
 			}
@@ -762,13 +810,12 @@ void loop() {
 		case STATE_OFFSET_CAL_SAMPLES:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint16_t stored_distance = 0;
 				uint16_t samples = atoi(g_rx_buffer);
 				
 				Command offset_cmd;
 				offset_cmd.dev_address = g_dev_address;
 				offset_cmd.command_id = CMD_START_OFFSET_CAL;
-				offset_cmd.data.offset_cal.cal_distance_mm = stored_distance;
+				offset_cmd.data.offset_cal.cal_distance_mm = g_temp_distance;
 				offset_cmd.data.offset_cal.samples_nbr = samples;
 				
 				if (sendCommandI2c(&offset_cmd)) {
@@ -785,8 +832,7 @@ void loop() {
 		case STATE_XTALK_CAL_DISTANCE:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint16_t stored_distance = 0;
-				stored_distance = atoi(g_rx_buffer);
+				g_temp_distance = atoi(g_rx_buffer);
 				Serial.print(F("Enter sample count (5-255): "));
 				g_state = STATE_XTALK_CAL_SAMPLES;
 			}
@@ -795,13 +841,12 @@ void loop() {
 		case STATE_XTALK_CAL_SAMPLES:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint16_t stored_distance = 0;
 				uint16_t samples = atoi(g_rx_buffer);
 				
 				Command xtalk_cmd;
 				xtalk_cmd.dev_address = g_dev_address;
 				xtalk_cmd.command_id = CMD_START_XTALK_CAL;
-				xtalk_cmd.data.xtalk_cal.cal_distance_mm = stored_distance;
+				xtalk_cmd.data.xtalk_cal.cal_distance_mm = g_temp_distance;
 				xtalk_cmd.data.xtalk_cal.samples_nbr = samples;
 				
 				if (sendCommandI2c(&xtalk_cmd)) {
@@ -818,8 +863,7 @@ void loop() {
 		case STATE_SET_THRESHOLD_SIGMA:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint16_t stored_sigma = 0;
-				stored_sigma = atoi(g_rx_buffer);
+				g_temp_sigma = atoi(g_rx_buffer);
 				Serial.print(F("Enter signal threshold (kcps): "));
 				g_state = STATE_SET_THRESHOLD_SIGNAL;
 			}
@@ -828,13 +872,12 @@ void loop() {
 		case STATE_SET_THRESHOLD_SIGNAL:
 			if (g_new_command) {
 				g_new_command = false;
-				static uint16_t stored_sigma = 0;
 				uint16_t signal = atoi(g_rx_buffer);
 				
 				Command threshold_cmd;
 				threshold_cmd.dev_address = g_dev_address;
 				threshold_cmd.command_id = CMD_SET_THRESHOLDS;
-				threshold_cmd.data.set_thresholds.sigma = stored_sigma;
+				threshold_cmd.data.set_thresholds.sigma = g_temp_sigma;
 				threshold_cmd.data.set_thresholds.signal_threshold = signal;
 				
 				if (sendCommandI2c(&threshold_cmd)) {
