@@ -38,7 +38,9 @@ enum SystemState {
 	STATE_XTALK_CAL_DISTANCE,
 	STATE_XTALK_CAL_SAMPLES,
 	STATE_SET_THRESHOLD_SIGMA,
-	STATE_SET_THRESHOLD_SIGNAL
+	STATE_SET_THRESHOLD_SIGNAL,
+	STATE_RANGE_ALL_UNITS,
+	STATE_RANGE_ALL_EXEC
 };
 
 // Command structure (matches PSoC5 Command typedef)
@@ -360,6 +362,7 @@ static void printCommandMenu(void) {
 	Serial.println(F("9  - Set Thresholds"));
 	Serial.println(F("10 - Restart"));
 	Serial.println(F("11 - Scan for Available I2C Devices"));
+	Serial.println(F("12 - Range All Devices Simultaneously"));
 	Serial.print(F("Enter command number: "));
 }
 
@@ -406,6 +409,103 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 	}
 	
 	Serial.println(F("Timeout: No valid data"));
+}
+
+// Execute ranging command on all detected devices simultaneously
+static void executeRangingCommandAllDevices(uint8_t units) {
+	if (g_num_devices == 0) {
+		Serial.println(F("No devices detected"));
+		return;
+	}
+	
+	Serial.print(F("Sending range command to all "));
+	Serial.print(g_num_devices);
+	Serial.println(F(" device(s)..."));
+	
+	// Send command to all devices simultaneously
+	uint8_t success_count = 0;
+	for (uint8_t i = 0; i < g_num_devices; i++) {
+		Command range_cmd;
+		range_cmd.dev_address = g_detected_devices[i];
+		range_cmd.command_id = CMD_GET_RANGING_RESULT;
+		range_cmd.data.get_ranging.unitsbyte = units;
+		
+		if (sendCommandI2c(&range_cmd)) {
+			success_count++;
+		} else {
+			Serial.print(F("Failed to send range command to 0x"));
+			Serial.println(g_detected_devices[i], HEX);
+		}
+	}
+	
+	if (success_count == 0) {
+		Serial.println(F("Failed to send command to any device"));
+		return;
+	}
+	
+	// Wait for initial processing
+	delay(20);
+	
+	// Track which devices have valid data
+	bool data_valid[MAX_I2C_DEVICES] = {false};
+	uint8_t device_data[MAX_I2C_DEVICES][15];
+	memset(device_data, 0, sizeof(device_data));
+	
+	// Poll all devices until all have valid data
+	uint32_t attempts = 0;
+	const uint32_t max_attempts = 100;
+	
+	while (attempts < max_attempts) {
+		bool all_valid = true;
+		delay(10);
+		for (uint8_t i = 0; i < g_num_devices; i++) {
+			if (!data_valid[i]) {
+				if (i2cReadBytes(g_detected_devices[i], device_data[i], 15)) {
+					uint8_t status = device_data[i][2];
+					if (status == 0x00) {
+						data_valid[i] = true;
+					}
+				}
+				all_valid = false;
+			}
+		}
+		
+		// Check if all devices now have valid data
+		if (all_valid) {
+			break;
+		}
+		
+		delay(10);
+		attempts++;
+	}
+	
+	// Display results for all devices
+	Serial.println(F("\n=== Ranging Results (All Devices) ==="));
+	for (uint8_t i = 0; i < g_num_devices; i++) {
+		Serial.print(F("Device 0x"));
+		Serial.print(g_detected_devices[i], HEX);
+		Serial.print(F(": "));
+		
+		if (data_valid[i]) {
+			uint16_t distance = readU16Be(device_data[i], 0);
+			uint16_t signal = readU16Be(device_data[i], 3);
+			uint16_t ambient = readU16Be(device_data[i], 5);
+			uint16_t sigma = readU16Be(device_data[i], 7);
+			
+			Serial.print(distance);
+			Serial.print(F(" "));
+			Serial.print(unitLabel(units));
+			Serial.print(F(" | Signal: "));
+			Serial.print(signal);
+			Serial.print(F(" | Ambient: "));
+			Serial.print(ambient);
+			Serial.print(F(" | Sigma: "));
+			Serial.println(sigma);
+		} else {
+			Serial.println(F("Timeout - No valid data"));
+		}
+	}
+	Serial.println();
 }
 
 // ============================================================================
@@ -604,6 +704,14 @@ void loop() {
 					case 11:
 						scanI2cAddresses();
 						printCommandMenu();
+						break;
+					case 12:
+						g_state = STATE_RANGE_ALL_UNITS;
+						Serial.println(F("\nSelect unit:"));
+						Serial.println(F("1) Millimeters (mm)"));
+						Serial.println(F("2) Centimeters (cm)"));
+						Serial.println(F("3) Inches (inch)"));
+						Serial.print(F("Enter choice: "));
 						break;
 					default:
 						Serial.println(F("Unknown command."));
@@ -889,6 +997,40 @@ void loop() {
 				g_state = STATE_IDLE;
 				printCommandMenu();
 			}
+			break;
+			
+		case STATE_RANGE_ALL_UNITS:
+			if (g_new_command) {
+				g_new_command = false;
+				int unit_choice = atoi(g_rx_buffer);
+				switch (unit_choice) {
+					case 1:
+						g_selected_unit = MM;
+						break;
+					case 2:
+						g_selected_unit = CM;
+						break;
+					case 3:
+						g_selected_unit = INCH;
+						break;
+					default:
+						Serial.println(F("Invalid choice."));
+						g_state = STATE_IDLE;
+						printCommandMenu();
+						break;
+				}
+				if (unit_choice >= 1 && unit_choice <= 3) {
+					g_state = STATE_RANGE_ALL_EXEC;
+				}
+			}
+			break;
+			
+		case STATE_RANGE_ALL_EXEC:
+			Serial.print(F("Ranging all devices with unit: "));
+			Serial.println(unitLabel(g_selected_unit));
+			executeRangingCommandAllDevices(g_selected_unit);
+			g_state = STATE_IDLE;
+			printCommandMenu();
 			break;
 	}
 }
