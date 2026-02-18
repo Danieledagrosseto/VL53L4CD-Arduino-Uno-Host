@@ -84,6 +84,11 @@ uint8_t g_temp_timebudget = 0;
 uint16_t g_temp_distance = 0;
 uint16_t g_temp_sigma = 0;
 
+// Timing tracking for non-blocking delays
+unsigned long g_delay_start_ms = 0;
+uint16_t g_delay_duration_ms = 0;
+bool g_delay_active = false;
+
 // I2C device detection
 #define MAX_I2C_DEVICES 10
 uint8_t g_detected_devices[MAX_I2C_DEVICES] = {0};
@@ -101,6 +106,29 @@ void serialEventRun(void) {
 			g_rx_buffer[g_rx_index++] = c;
 		}
 	}
+}
+
+// ============================================================================
+// Non-blocking Delay Functions (using millis())
+// ============================================================================
+
+// Start a non-blocking delay
+static void startDelay(uint16_t duration_ms) {
+	g_delay_start_ms = millis();
+	g_delay_duration_ms = duration_ms;
+	g_delay_active = true;
+}
+
+// Check if delay has completed (call repeatedly in loop)
+static bool isDelayComplete(void) {
+	if (!g_delay_active) {
+		return true;
+	}
+	if (millis() - g_delay_start_ms >= g_delay_duration_ms) {
+		g_delay_active = false;
+		return true;
+	}
+	return false;
 }
 
 // ============================================================================
@@ -133,7 +161,10 @@ static uint8_t detectI2cSlave(void) {
 		if (Wire.endTransmission() == 0) {
 			return addr;
 		}
-		delay(10);
+		unsigned long start = millis();
+		while (millis() - start < 10) {
+			serialEventRun();
+		}
 	}
 	return 0;
 }
@@ -167,7 +198,10 @@ static void scanI2cAddresses(void) {
 			} else {
 				Serial.print(F("-- "));
 			}
-			delay(10);
+			unsigned long start = millis();
+			while (millis() - start < 10) {
+				serialEventRun();
+			}
 		}
 		
 		if ((address & 0x0F) == 0x0F) {
@@ -326,7 +360,11 @@ static void requestConfig(uint8_t dev_addr) {
 		return;
 	}
 	
-	delay(50);  // Give device time to prepare config data
+	// Give device time to prepare config data
+	unsigned long start = millis();
+	while (millis() - start < 50) {
+		serialEventRun();
+	}
 	if (!i2cReadBytes(dev_addr, cfg, sizeof(cfg))) {
 		Serial.println(F("Failed to read config"));
 		return;
@@ -379,13 +417,20 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 		return;
 	}
 	
-	delay(20);  // Give device time to process command
+	// Give device time to process command
+	unsigned long start = millis();
+	while (millis() - start < 20) {
+		serialEventRun();
+	}
 	uint8_t range_data[15] = {0};
 	uint32_t attempts = 0;
 	const uint32_t max_attempts = 100;
 	
 	while (attempts < max_attempts) {
-		delay(10);
+		unsigned long loop_start = millis();
+		while (millis() - loop_start < 10) {
+			serialEventRun();
+		}
 		if (i2cReadBytes(dev_address, range_data, sizeof(range_data))) {
 			uint8_t status = range_data[2];
 			if (status == 0x00) {
@@ -444,7 +489,10 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 	}
 	
 	// Wait for initial processing
-	delay(20);
+	unsigned long start = millis();
+	while (millis() - start < 20) {
+		serialEventRun();
+	}
 	
 	// Track which devices have valid data
 	bool data_valid[MAX_I2C_DEVICES] = {false};
@@ -457,7 +505,6 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 	
 	while (attempts < max_attempts) {
 		bool all_valid = true;
-		delay(10);
 		for (uint8_t i = 0; i < g_num_devices; i++) {
 			if (!data_valid[i]) {
 				if (i2cReadBytes(g_detected_devices[i], device_data[i], 15)) {
@@ -475,7 +522,10 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 			break;
 		}
 		
-		delay(10);
+		unsigned long loop_start = millis();
+		while (millis() - loop_start < 10) {
+			serialEventRun();
+		}
 		attempts++;
 	}
 	
@@ -514,7 +564,10 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 
 void setup() {
 	Serial.begin(115200);
-	delay(5000);  // Allow power-up
+	unsigned long power_up_start = millis();
+	while (millis() - power_up_start < 5000) {
+		serialEventRun();
+	}
 	Wire.begin();
 	Wire.setClock(400000);
 	
@@ -530,28 +583,33 @@ void setup() {
 	}
 	
 	g_state = STATE_IDLE;
-	delay(500);
+	unsigned long menu_start = millis();
+	while (millis() - menu_start < 500) {
+		serialEventRun();
+	}
 	printCommandMenu();
 }
 
 // Helper: Read a line from serial (waits up to 30 seconds for input)
+// Relies on serialEventRun() to populate g_rx_buffer
 static uint8_t readLine(char *buffer, uint8_t max_len) {
-	uint8_t len = 0;
 	unsigned long timeout = millis() + 30000;  // 30 second timeout
 	
-	while (len < max_len - 1 && millis() < timeout) {
-		if (Serial.available()) {
-			char c = Serial.read();
-			if (c == '\n' || c == '\r') {
-				buffer[len] = '\0';
-				return len;
-			}
-			buffer[len++] = c;
+	while (millis() < timeout) {
+		serialEventRun();
+		if (g_new_command) {
+			g_new_command = false;
+			uint8_t len = strlen(g_rx_buffer);
+			strncpy(buffer, g_rx_buffer, max_len - 1);
+			buffer[max_len - 1] = '\0';
+			g_rx_buffer[0] = '\0';
+			g_rx_index = 0;
+			return len;
 		}
-		delay(10);  // Small delay to prevent busy loop and allow other processing
 	}
-	buffer[len] = '\0';
-	return len;
+	
+	buffer[0] = '\0';
+	return 0;
 }
 
 // Helper: Parse unsigned 16-bit from string with bounds check
@@ -840,6 +898,10 @@ void loop() {
 					Serial.print(F("Address changed successfully to 0x"));
 					Serial.println(new_addr, HEX);
 					g_dev_address = new_addr;
+					
+					// Re-scan I2C bus to update device list
+					Serial.println(F("\nRe-scanning I2C bus to update device list..."));
+					scanI2cAddresses();
 				} else {
 					Serial.println(F("Failed to change address."));
 				}
@@ -877,7 +939,12 @@ void loop() {
 				
 				if (sendCommandI2c(&timing_cmd)) {
 					Serial.println(F("Timing updated."));
-					delay(100);  // Give device time to process timing change
+					
+					// Give device time to process timing change
+					unsigned long timing_start = millis();
+					while (millis() - timing_start < 100) {
+						serialEventRun();
+					}
 					
 					Command save_cmd;
 					save_cmd.dev_address = g_dev_address;
@@ -887,7 +954,12 @@ void loop() {
 					} else {
 						Serial.println(F("Failed to save configuration."));
 					}
-					delay(100);  // Give device time to save to EEPROM
+					
+					// Give device time to save to EEPROM
+					unsigned long save_start = millis();
+					while (millis() - save_start < 100) {
+						serialEventRun();
+					}
 					
 					Command restart_cmd;
 					restart_cmd.dev_address = g_dev_address;
