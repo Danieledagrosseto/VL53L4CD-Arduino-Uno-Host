@@ -637,8 +637,8 @@ void setup() {
 	while (!Serial) {
 		;
 	}
-	// Allow 5 seconds after power-up before I2C activity.
-	delay(5000);
+	// Allow 10 seconds after power-up before I2C activity.
+	delay(10000);
 	Wire.begin();
 	Wire.setClock(400000);
 	printMenu();
@@ -737,8 +737,8 @@ void process_data(uint8_t deviceIndex, uint8_t address, uint16_t distance, uint8
 
 // Initialize I2C and detect all connected devices
 void setup() {
-	// Allow 5 seconds after power-up before I2C activity
-	delay(5000);
+	// Allow 10 seconds after power-up before I2C activity
+	delay(10000);
 	
 	Wire.begin();
 	Wire.setClock(400000);
