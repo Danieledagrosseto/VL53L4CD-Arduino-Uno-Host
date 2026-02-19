@@ -85,7 +85,12 @@ Arduino Uno I2C host firmware for interfacing with VL53L4CD Time-of-Flight (ToF)
    - J1 Pin 3 (SCL) → Arduino A5
    - J1 Pin 5 (GND) → Arduino GND
 
-2. For multiple sensors, use unique I2C addresses (see [address change procedure](#change-i2c-address))
+2. Verify connection: Observe the LED blink pattern at power-on:
+   - **One long blink**: Normal address range (0x08-0xF0)
+   - **One long + short blinks**: High address range (0xF0-0xFF)
+   - Default address 0x70 shows one long blink
+
+3. For multiple sensors, use unique I2C addresses (see [address change procedure](#change-i2c-address))
 
 ### 2. Configure Build Settings
 
@@ -263,6 +268,9 @@ Each VL53L4CD breakout board contains an ATtiny85 microcontroller running custom
 
 ### Firmware Features
 
+- **Power-On LED Indicator**: Each device blinks its onboard LED at power-on to indicate I2C address range:
+  - **One long blink**: Address between 0x08 and 0xF0 (most common range)
+  - **One long blink + N short blinks**: Address between 0xF0 and 0xFF, where N = (address - 0xF0)
 - **Persistent Configuration**: All settings stored in EEPROM survive power cycles
 - **Calibration Storage**: Offset and crosstalk values saved automatically
 - **Watchdog Protection**: WDT ensures recovery from errors
