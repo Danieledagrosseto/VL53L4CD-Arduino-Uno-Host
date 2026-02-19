@@ -40,7 +40,9 @@ enum SystemState {
 	STATE_SET_THRESHOLD_SIGMA,
 	STATE_SET_THRESHOLD_SIGNAL,
 	STATE_RANGE_ALL_UNITS,
-	STATE_RANGE_ALL_EXEC
+	STATE_RANGE_ALL_EXEC,
+	STATE_RANGE_ALL_CONTINUOUS_UNITS,
+	STATE_RANGE_ALL_CONTINUOUS_RATE
 };
 
 // Command structure (matches PSoC5 Command typedef)
@@ -401,6 +403,7 @@ static void printCommandMenu(void) {
 	Serial.println(F("10 - Restart"));
 	Serial.println(F("11 - Scan for Available I2C Devices"));
 	Serial.println(F("12 - Range All Devices Simultaneously"));
+	Serial.println(F("13 - Continuous Range All Devices"));
 	Serial.print(F("Enter command number: "));
 }
 
@@ -556,6 +559,123 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 		}
 	}
 	Serial.println();
+}
+
+// Execute continuous ranging on all detected devices simultaneously
+static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t repeat_rate_ms) {
+	if (g_num_devices == 0) {
+		Serial.println(F("No devices detected"));
+		return;
+	}
+	
+	Serial.print(F("Continuous ranging on all "));
+	Serial.print(g_num_devices);
+	Serial.print(F(" device(s) at "));
+	Serial.print(repeat_rate_ms);
+	Serial.println(F(" ms rate. Press 's' to stop."));
+	
+	unsigned long last_range_ms = 0;
+	
+	while (true) {
+		serialEventRun();
+		
+		// Check for stop command
+		if (g_new_command) {
+			g_new_command = false;
+			if ((g_rx_buffer[0] == 's' || g_rx_buffer[0] == 'S') && g_rx_buffer[1] == '\0') {
+				Serial.println(F("Continuous ranging stopped."));
+				break;
+			}
+		}
+		if (Serial.available()) {
+			char c = Serial.read();
+			if (c == 's' || c == 'S') {
+				Serial.println(F("Continuous ranging stopped."));
+				break;
+			}
+		}
+		
+		unsigned long now = millis();
+		if (now - last_range_ms >= repeat_rate_ms) {
+			// Send command to all devices
+			for (uint8_t i = 0; i < g_num_devices; i++) {
+				Command range_cmd;
+				range_cmd.dev_address = g_detected_devices[i];
+				range_cmd.command_id = CMD_GET_RANGING_RESULT;
+				range_cmd.data.get_ranging.unitsbyte = units;
+				sendCommandI2c(&range_cmd);
+			}
+			
+			// Wait for initial processing (longer wait for multiple devices)
+			unsigned long cmd_start = millis();
+			while (millis() - cmd_start < 50) {
+				serialEventRun();
+			}
+			
+			// Track which devices have valid data
+			bool data_valid[MAX_I2C_DEVICES] = {false};
+			uint8_t device_data[MAX_I2C_DEVICES][15];
+			memset(device_data, 0, sizeof(device_data));
+			
+			// Poll all devices until all have valid data or timeout
+			uint32_t attempts = 0;
+			const uint32_t max_attempts = 200;  // Increased to 2 seconds total for continuous mode
+			
+			while (attempts < max_attempts) {
+				bool all_valid = true;
+				for (uint8_t i = 0; i < g_num_devices; i++) {
+					if (!data_valid[i]) {
+						if (i2cReadBytes(g_detected_devices[i], device_data[i], 15)) {
+							uint8_t status = device_data[i][2];
+							if (status == 0x00) {
+								data_valid[i] = true;
+							}
+						}
+						all_valid = false;
+					}
+				}
+				
+				if (all_valid) {
+					break;
+				}
+				
+				unsigned long poll_start = millis();
+				while (millis() - poll_start < 10) {
+					serialEventRun();
+				}
+				attempts++;
+			}
+			
+			// Display results for all devices
+			Serial.println(F("---"));
+			for (uint8_t i = 0; i < g_num_devices; i++) {
+				Serial.print(F("0x"));
+				Serial.print(g_detected_devices[i], HEX);
+				Serial.print(F(": "));
+				
+				if (data_valid[i]) {
+					uint16_t distance = readU16Be(device_data[i], 0);
+					uint16_t signal = readU16Be(device_data[i], 3);
+					uint16_t ambient = readU16Be(device_data[i], 5);
+					uint16_t sigma = readU16Be(device_data[i], 7);
+					
+					Serial.print(distance);
+					Serial.print(F(" "));
+					Serial.print(unitLabel(units));
+					Serial.print(F(" | Sig: "));
+					Serial.print(signal);
+					Serial.print(F(" | Amb: "));
+					Serial.print(ambient);
+					Serial.print(F(" | Sig: "));
+					Serial.println(sigma);
+				} else {
+					Serial.println(F("No data"));
+				}
+			}
+			
+			last_range_ms = now;
+		}
+	}
 }
 
 // ============================================================================
@@ -765,6 +885,14 @@ void loop() {
 						break;
 					case 12:
 						g_state = STATE_RANGE_ALL_UNITS;
+						Serial.println(F("\nSelect unit:"));
+						Serial.println(F("1) Millimeters (mm)"));
+						Serial.println(F("2) Centimeters (cm)"));
+						Serial.println(F("3) Inches (inch)"));
+						Serial.print(F("Enter choice: "));
+						break;
+					case 13:
+						g_state = STATE_RANGE_ALL_CONTINUOUS_UNITS;
 						Serial.println(F("\nSelect unit:"));
 						Serial.println(F("1) Millimeters (mm)"));
 						Serial.println(F("2) Centimeters (cm)"));
@@ -1103,6 +1231,43 @@ void loop() {
 			executeRangingCommandAllDevices(g_selected_unit);
 			g_state = STATE_IDLE;
 			printCommandMenu();
+			break;
+			
+		case STATE_RANGE_ALL_CONTINUOUS_UNITS:
+			if (g_new_command) {
+				g_new_command = false;
+				int unit_choice = atoi(g_rx_buffer);
+				switch (unit_choice) {
+					case 1:
+						g_selected_unit = MM;
+						break;
+					case 2:
+						g_selected_unit = CM;
+						break;
+					case 3:
+						g_selected_unit = INCH;
+						break;
+					default:
+						Serial.println(F("Invalid choice."));
+						g_state = STATE_IDLE;
+						printCommandMenu();
+						break;
+				}
+				if (unit_choice >= 1 && unit_choice <= 3) {
+					g_state = STATE_RANGE_ALL_CONTINUOUS_RATE;
+					Serial.print(F("Enter repetition rate in ms: "));
+				}
+			}
+			break;
+			
+		case STATE_RANGE_ALL_CONTINUOUS_RATE:
+			if (g_new_command) {
+				g_new_command = false;
+				uint16_t repeat_ms = atoi(g_rx_buffer);
+				executeRangingCommandAllDevicesContinuous(g_selected_unit, repeat_ms);
+				g_state = STATE_IDLE;
+				printCommandMenu();
+			}
 			break;
 	}
 }
