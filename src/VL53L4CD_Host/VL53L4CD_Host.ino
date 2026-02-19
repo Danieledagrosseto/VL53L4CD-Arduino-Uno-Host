@@ -1,3 +1,7 @@
+// Uncomment to enable interactive setup/configuration mode
+// Comment out (or leave undefined) to enable autonomous ranging mode
+// #define SETUP_RANGING
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <ctype.h>
@@ -41,6 +45,11 @@ static uint16_t readU16Be(const uint8_t *buf, uint8_t msbIndex) {
 static int16_t readS16Be(const uint8_t *buf, uint8_t msbIndex) {
 	return static_cast<int16_t>(readU16Be(buf, msbIndex));
 }
+
+#ifdef SETUP_RANGING
+// ============================================================================
+// SETUP/CONFIGURATION MODE - Interactive serial-based configuration
+// ============================================================================
 
 // Decode and print the config payload fields returned by the sensor.
 static void printConfigFields(uint8_t addr, const uint8_t *cfg, uint8_t len) {
@@ -648,3 +657,119 @@ void loop() {
 	handleCommand(cmd);
 	printMenu();
 }
+
+#else
+// ============================================================================
+// AUTONOMOUS RANGING MODE - Continuous ranging without serial interaction
+// ============================================================================
+
+// Structure to store device information
+struct DeviceInfo {
+	uint8_t address;
+	uint8_t timeBudgetMs;
+	uint16_t interMeasurementMs;
+	int16_t offsetMm;
+	uint16_t xtalkKcps;
+	uint16_t sigmaThresholdMm;
+	uint16_t signalThresholdKcps;
+	uint8_t firmwareRev;
+};
+
+// Global device list and count
+static DeviceInfo devices[120];
+static uint8_t deviceCount = 0;
+
+// Ranging configuration
+static const uint8_t RANGING_UNIT = 0x52; // mm
+static const uint16_t RANGING_PERIOD_MS = 100; // Adjust as needed
+static unsigned long lastRangingTime = 0;
+
+// Detect connected I2C devices and read their configurations
+static void detectDevices() {
+	deviceCount = 0;
+	
+	for (uint8_t addr = 0x08; addr <= 0x7F; ++addr) {
+		Wire.beginTransmission(addr);
+		if (Wire.endTransmission() != 0) {
+			continue;
+		}
+		
+		// Device found, read its configuration
+		uint8_t cfg[13] = {0};
+		if (!readConfig(addr, cfg, sizeof(cfg))) {
+			continue;
+		}
+		
+		if (deviceCount < 120) {
+			devices[deviceCount].address = addr;
+			devices[deviceCount].timeBudgetMs = cfg[1];
+			devices[deviceCount].interMeasurementMs = readU16Be(cfg, 2);
+			devices[deviceCount].offsetMm = readS16Be(cfg, 4);
+			devices[deviceCount].xtalkKcps = readU16Be(cfg, 6);
+			devices[deviceCount].sigmaThresholdMm = readU16Be(cfg, 8);
+			devices[deviceCount].signalThresholdKcps = readU16Be(cfg, 10);
+			devices[deviceCount].firmwareRev = cfg[12];
+			deviceCount++;
+		}
+	}
+}
+
+// User-defined function to process ranging data between acquisitions
+// Leave this empty for the user to implement their custom data processing
+void process_data(uint8_t deviceIndex, uint8_t address, uint16_t distance, uint8_t rangeStatus, const uint8_t* rangingData) {
+	// TODO: User implementation goes here
+	// 
+	// Parameters:
+	//   deviceIndex: Index of the device in the devices array (0-based)
+	//   address: I2C address of the device
+	//   distance: Distance reading in the configured unit (mm by default)
+	//   rangeStatus: Range status code (0 = valid)
+	//   rangingData: Pointer to full 15-byte ranging result buffer
+	//     [0-1]: distance (uint16_t, big-endian)
+	//     [2]: range status
+	//     [3-4]: signal rate (uint16_t, big-endian)
+	//     [5-6]: ambient rate (uint16_t, big-endian)
+	//     [7-8]: sigma (uint16_t, big-endian)
+	//     [9-10]: ambient per spad (uint16_t, big-endian)
+	//     [11-12]: signal per spad (uint16_t, big-endian)
+	//     [13-14]: number of spads (uint16_t, big-endian)
+}
+
+// Initialize I2C and detect all connected devices
+void setup() {
+	// Allow 5 seconds after power-up before I2C activity
+	delay(5000);
+	
+	Wire.begin();
+	Wire.setClock(400000);
+	
+	// Detect all connected devices and read their configurations
+	detectDevices();
+}
+
+// Continuously perform ranging on all detected devices
+void loop() {
+	unsigned long currentTime = millis();
+	
+	// Check if it's time for the next ranging cycle
+	if (currentTime - lastRangingTime >= RANGING_PERIOD_MS) {
+		lastRangingTime = currentTime;
+		
+		// Perform ranging on all detected devices
+		uint8_t buf[15] = {0};
+		for (uint8_t i = 0; i < deviceCount; ++i) {
+			uint8_t addr = devices[i].address;
+			
+			// Perform ranging with polling
+			if (readRangingWithPoll(addr, RANGING_UNIT, buf, sizeof(buf))) {
+				uint16_t distance = readU16Be(buf, 0);
+				uint8_t rangeStatus = buf[2];
+				
+				// Call user-defined data processing function
+				process_data(i, addr, distance, rangeStatus, buf);
+			}
+		}
+	}
+}
+
+#endif // SETUP_RANGING
