@@ -678,15 +678,51 @@ struct DeviceInfo {
 // Global device list and count
 static DeviceInfo devices[120];
 static uint8_t deviceCount = 0;
+static uint8_t longestTimeBudgetMs = 0;
 
 // Ranging configuration
 static const uint8_t RANGING_UNIT = 0x52; // mm
 static const uint16_t RANGING_PERIOD_MS = 100; // Adjust as needed
-static unsigned long lastRangingTime = 0;
+static uint16_t effectiveRangingPeriodMs = RANGING_PERIOD_MS;
+
+// One-iteration delayed processing state
+static uint8_t currentDeviceIndex = 0;
+static bool hasPreviousRangingData = false;
+static uint8_t previousDeviceIndex = 0;
+static uint8_t previousAddress = 0;
+static uint16_t previousDistance = 0;
+static uint8_t previousRangeStatus = 0;
+static uint8_t previousRangingData[15] = {0};
+
+// Send a ranging command without reading the result.
+static bool sendRangingCommand(uint8_t addr, uint8_t unit) {
+	uint8_t cmd[2] = {0x00, unit};
+	return i2cWriteBytes(addr, cmd, sizeof(cmd));
+}
+
+// Read a ranging result by polling range status until ready or timeout.
+static bool readRangingResultWithPoll(uint8_t addr, uint8_t *buf, uint8_t len) {
+	const uint16_t pollIntervalMs = 10;
+	const uint16_t timeoutMs = 1000;
+	const unsigned long startMs = millis();
+	while (true) {
+		if (!i2cReadBytes(addr, buf, len)) {
+			return false;
+		}
+		if (buf[2] == 0) {
+			return true;
+		}
+		if (static_cast<uint16_t>(millis() - startMs) >= timeoutMs) {
+			return false;
+		}
+		delay(pollIntervalMs);
+	}
+}
 
 // Detect connected I2C devices and read their configurations
 static void detectDevices() {
 	deviceCount = 0;
+	longestTimeBudgetMs = 0;
 	
 	for (uint8_t addr = 0x08; addr <= 0x7F; ++addr) {
 		Wire.beginTransmission(addr);
@@ -703,6 +739,9 @@ static void detectDevices() {
 		if (deviceCount < 120) {
 			devices[deviceCount].address = addr;
 			devices[deviceCount].timeBudgetMs = cfg[1];
+			if (cfg[1] > longestTimeBudgetMs) {
+				longestTimeBudgetMs = cfg[1];
+			}
 			devices[deviceCount].interMeasurementMs = readU16Be(cfg, 2);
 			devices[deviceCount].offsetMm = readS16Be(cfg, 4);
 			devices[deviceCount].xtalkKcps = readU16Be(cfg, 6);
@@ -745,31 +784,51 @@ void setup() {
 	
 	// Detect all connected devices and read their configurations
 	detectDevices();
+	if (effectiveRangingPeriodMs < longestTimeBudgetMs) {
+		effectiveRangingPeriodMs = longestTimeBudgetMs;
+	}
 }
 
 // Continuously perform ranging on all detected devices
 void loop() {
-	unsigned long currentTime = millis();
-	
-	// Check if it's time for the next ranging cycle
-	if (currentTime - lastRangingTime >= RANGING_PERIOD_MS) {
-		lastRangingTime = currentTime;
-		
-		// Perform ranging on all detected devices
-		uint8_t buf[15] = {0};
-		for (uint8_t i = 0; i < deviceCount; ++i) {
-			uint8_t addr = devices[i].address;
-			
-			// Perform ranging with polling
-			if (readRangingWithPoll(addr, RANGING_UNIT, buf, sizeof(buf))) {
-				uint16_t distance = readU16Be(buf, 0);
-				uint8_t rangeStatus = buf[2];
-				
-				// Call user-defined data processing function
-				process_data(i, addr, distance, rangeStatus, buf);
-			}
-		}
+	if (deviceCount == 0) {
+		return;
 	}
+
+	if (currentDeviceIndex >= deviceCount) {
+		currentDeviceIndex = 0;
+	}
+
+	const unsigned long iterationStartMs = millis();
+	const uint8_t deviceIndex = currentDeviceIndex;
+	const uint8_t addr = devices[deviceIndex].address;
+
+	// 1) Send ranging command.
+	const bool commandSent = sendRangingCommand(addr, RANGING_UNIT);
+
+	// 2) Process data acquired in the previous iteration.
+	if (hasPreviousRangingData) {
+		process_data(previousDeviceIndex, previousAddress, previousDistance, previousRangeStatus, previousRangingData);
+		hasPreviousRangingData = false;
+	}
+
+	// 3) Possibly wait for iteration period to expire.
+	const unsigned long elapsedMs = millis() - iterationStartMs;
+	if (elapsedMs < effectiveRangingPeriodMs) {
+		delay(static_cast<uint16_t>(effectiveRangingPeriodMs - elapsedMs));
+	}
+
+	// Acquire data for processing in the next iteration.
+	if (commandSent && readRangingResultWithPoll(addr, previousRangingData, sizeof(previousRangingData))) {
+		previousDeviceIndex = deviceIndex;
+		previousAddress = addr;
+		previousDistance = readU16Be(previousRangingData, 0);
+		previousRangeStatus = previousRangingData[2];
+		hasPreviousRangingData = true;
+	}
+
+	// 4) Back to point 1.
+	currentDeviceIndex = static_cast<uint8_t>((currentDeviceIndex + 1) % deviceCount);
 }
 
 #endif // SETUP_RANGING
