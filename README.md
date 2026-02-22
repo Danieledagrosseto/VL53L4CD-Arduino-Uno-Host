@@ -6,6 +6,7 @@ Arduino Uno I2C host firmware for interfacing with VL53L4CD Time-of-Flight (ToF)
 
 - [Features](#features)
 - [Hardware Overview](#hardware-overview)
+- [Tindie Listing](#tindie-listing)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
 - [Firmware Operation Modes](#firmware-operation-modes)
@@ -31,7 +32,7 @@ Arduino Uno I2C host firmware for interfacing with VL53L4CD Time-of-Flight (ToF)
 
 ### VL53L4CD Breakout Board Features
 
-- **ATtiny85 I2C Slave**: Firmware running on breakout board acts as I2C slave (default address 0x70)
+- **PSoC4 (CY8C4200 family) I2C Slave**: Firmware running on breakout board acts as I2C slave (default address 0x70)
 - **VL53L4CD Sensor**: STMicroelectronics Time-of-Flight ranging sensor
 - **EEPROM Storage**: Persistent storage of calibration values, timing parameters, and I2C address
 - **Multiple Ranging Units**: mm, cm, or inch
@@ -67,6 +68,12 @@ Arduino Uno I2C host firmware for interfacing with VL53L4CD Time-of-Flight (ToF)
 - Configurable address range: 0x08 to 0x7F
 - I2C clock frequency: 400 kHz (Fast Mode)
 - Multiple devices supported on same bus with unique addresses
+
+## Tindie Listing
+
+For a concise product-style description of the breakout board features, see:
+
+- [TINDIE.md](TINDIE.md)
 
 ## Prerequisites
 
@@ -258,7 +265,7 @@ void process_data(uint8_t deviceIndex, uint8_t address,
 
 ## VL53L4CD Breakout Board Firmware
 
-Each VL53L4CD breakout board contains an ATtiny85 microcontroller running custom firmware that:
+Each VL53L4CD breakout board contains a PSoC4 microcontroller from the CY8C4200 family running custom firmware that:
 
 1. Acts as an I2C slave (default address 0x70)
 2. Manages the VL53L4CD ToF sensor
