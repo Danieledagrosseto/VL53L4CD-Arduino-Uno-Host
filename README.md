@@ -25,7 +25,7 @@ This workspace provides an Arduino Uno host sketch for the VL53L4CD breakout boa
 
 ## J1 Connector Pins
 
-- Pin 1 (square): Vdd
+- Pin 1 (square): VDD 3V to 5.5V
 - Pin 2: SDA
 - Pin 3: SCL
 - Pin 4: NU
