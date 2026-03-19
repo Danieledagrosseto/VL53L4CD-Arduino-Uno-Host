@@ -32,7 +32,7 @@ static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
 		return false;
 	}
 	// Give the sensor time to prepare the response.
-	delay(5);
+	delay(10);
 	return i2cReadBytes(addr, cfg, len);
 }
 
@@ -314,7 +314,7 @@ static void printRangingResult(const uint8_t *buf, uint8_t len) {
 // Send a ranging command and poll until range status is ready or timeout.
 static bool readRangingWithPoll(uint8_t addr, uint8_t unit, uint8_t *buf, uint8_t len) {
 	const uint16_t pollIntervalMs = 5;
-	const uint16_t timeoutMs = 10;
+	const uint16_t timeoutMs = 20;
 	const unsigned long startMs = millis();
 	//uint8_t cmd[2] = {0x00, unit};
 	//if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
@@ -376,13 +376,26 @@ static void runContinuousRangingAll() {
 		return;
 	}
 
+	// Discover devices and read their time budgets.
 	uint8_t addresses[120] = {0};
+	uint8_t timeBudgets[120] = {0};
 	uint8_t count = 0;
+	uint8_t longestTimeBudgetMs = 0;
 	for (uint8_t addr = 0x08; addr <= 0x7F; ++addr) {
 		Wire.beginTransmission(addr);
-		if (Wire.endTransmission() == 0 && count < sizeof(addresses)) {
-			addresses[count++] = addr;
+		if (Wire.endTransmission() != 0 || count >= sizeof(addresses)) {
+			continue;
 		}
+		uint8_t cfg[13] = {0};
+		if (!readConfig(addr, cfg, sizeof(cfg))) {
+			continue;
+		}
+		addresses[count] = addr;
+		timeBudgets[count] = cfg[1];
+		if (cfg[1] > longestTimeBudgetMs) {
+			longestTimeBudgetMs = cfg[1];
+		}
+		count++;
 	}
 	if (count == 0) {
 		Serial.println(F("No I2C devices found."));
@@ -393,6 +406,7 @@ static void runContinuousRangingAll() {
 	uint8_t buf[15] = {0};
 	uint32_t sampleIndex = 0;
 	while (true) {
+		// Stop if 's' received.
 		if (Serial.available()) {
 			char c = static_cast<char>(Serial.read());
 			if (c == 's' || c == 'S') {
@@ -400,6 +414,21 @@ static void runContinuousRangingAll() {
 				return;
 			}
 		}
+
+		// Send start ranging command to all devices.
+		for (uint8_t i = 0; i < count; ++i) {
+			uint8_t cmd[2] = {0x00, unit};
+			i2cWriteBytes(addresses[i], cmd, sizeof(cmd));
+		}
+
+		// Wait for the longest time budget using millis().
+		if (longestTimeBudgetMs > 0) {
+			const unsigned long waitStart = millis();
+			while (static_cast<unsigned long>(millis() - waitStart) < longestTimeBudgetMs) {
+			}
+		}
+
+		// Read ranging results for all devices.
 		for (uint8_t i = 0; i < count; ++i) {
 			uint8_t addr = addresses[i];
 			if (!readRangingWithPoll(addr, unit, buf, sizeof(buf))) {
@@ -415,8 +444,12 @@ static void runContinuousRangingAll() {
 			Serial.print(F(" "));
 			Serial.println(unitLabel(unit));
 		}
+
+		// Wait repeat delay using millis().
 		if (repeatDelayMs > 0) {
-			delay(repeatDelayMs);
+			const unsigned long delayStart = millis();
+			while (static_cast<unsigned long>(millis() - delayStart) < repeatDelayMs) {
+			}
 		}
 	}
 }
@@ -443,6 +476,14 @@ static void runSetTiming() {
 		return;
 	}
 	Serial.println(F("Timing updated."));
+
+	// Send restart command to apply the new timing settings
+	uint8_t restartCmd = 0x08;
+	if (!i2cWriteBytes(addr, &restartCmd, 1)) {
+		Serial.println(F("Failed to restart device."));
+		return;
+	}
+	Serial.println(F("Device restarted."));
 }
 
 // Start an offset calibration with user-provided target distance.
