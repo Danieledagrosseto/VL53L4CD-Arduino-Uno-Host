@@ -1,3 +1,4 @@
+#line 1 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
 // Uncomment to enable interactive setup/configuration mode
 // Comment out (or leave undefined) to enable autonomous ranging mode
 // #define SETUP_RANGING
@@ -7,6 +8,29 @@
 #include <ctype.h>
 
 // Write a raw command/data payload to the given I2C address.
+#line 10 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static bool i2cWriteBytes(uint8_t addr, const uint8_t *data, uint8_t len);
+#line 19 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static bool i2cReadBytes(uint8_t addr, uint8_t *data, uint8_t len);
+#line 29 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len);
+#line 40 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static uint16_t readU16Be(const uint8_t *buf, uint8_t msbIndex);
+#line 45 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static int16_t readS16Be(const uint8_t *buf, uint8_t msbIndex);
+#line 698 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static bool sendRangingCommand(uint8_t addr, uint8_t unit);
+#line 704 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static bool readRangingResultWithPoll(uint8_t addr, uint8_t *buf, uint8_t len);
+#line 723 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+static void detectDevices();
+#line 758 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+void process_data(uint8_t deviceIndex, uint8_t address, uint16_t distance, uint8_t rangeStatus, const uint8_t* rangingData);
+#line 778 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+void setup();
+#line 793 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
+void loop();
+#line 10 "C:\\Users\\danie\\Documents\\VS Code\\Arduino Uno projects\\VL53L4CD Arduino Uno Host\\src\\VL53L4CD_Host\\VL53L4CD_Host.ino"
 static bool i2cWriteBytes(uint8_t addr, const uint8_t *data, uint8_t len) {
 	Wire.beginTransmission(addr);
 	for (uint8_t i = 0; i < len; ++i) {
@@ -45,34 +69,6 @@ static uint16_t readU16Be(const uint8_t *buf, uint8_t msbIndex) {
 static int16_t readS16Be(const uint8_t *buf, uint8_t msbIndex) {
 	return static_cast<int16_t>(readU16Be(buf, msbIndex));
 }
-
-// Maximum measurable distance reported for out-of-range phase/wrap/low-signal errors.
-static const uint16_t RANGING_MAX_DISTANCE_MM = 1300;
-
-// Map a range-status byte (buf[2]) to an effective distance value.
-// Gravity None (0) or Warning (1, 2, 6): return raw sensor distance.
-// Status 3 (below detection threshold): return 0.
-// Status 4, 7, 12 (phase/wrap/low-signal errors): return RANGING_MAX_DISTANCE_MM.
-// All other errors: return 0.
-static uint16_t resolveDistance(uint16_t rawDistance, uint8_t status) {
-	switch (status) {
-		case 0:   // None: valid distance
-		case 1:   // Warning: sigma above threshold
-		case 2:   // Warning: signal below threshold
-		case 6:   // Warning: phase valid, no wrap-around check
-			return rawDistance;
-		case 3:   // Error: below detection threshold
-			return 0;
-		case 4:   // Error: phase out of valid limit
-		case 7:   // Error: wrapped target, phase mismatch
-		case 12:  // Error: signal too low
-			return RANGING_MAX_DISTANCE_MM;
-		default:  // All other errors
-			return 0;
-	}
-}
-
-#define SETUP_RANGING
 
 #ifdef SETUP_RANGING
 // ============================================================================
@@ -291,8 +287,8 @@ static void printRangingResult(const uint8_t *buf, uint8_t len) {
 		Serial.println(F("Ranging buffer too small."));
 		return;
 	}
+	const uint16_t distance = readU16Be(buf, 0);
 	const uint8_t rangeStatus = buf[2];
-	const uint16_t distance = resolveDistance(readU16Be(buf, 0), rangeStatus);
 	Serial.print(F("Distance: "));
 	Serial.println(distance);
 	Serial.print(F("Range status: "));
@@ -313,18 +309,18 @@ static void printRangingResult(const uint8_t *buf, uint8_t len) {
 
 // Send a ranging command and poll until range status is ready or timeout.
 static bool readRangingWithPoll(uint8_t addr, uint8_t unit, uint8_t *buf, uint8_t len) {
-	const uint16_t pollIntervalMs = 5;
-	const uint16_t timeoutMs = 10;
+	const uint16_t pollIntervalMs = 10;
+	const uint16_t timeoutMs = 1000;
 	const unsigned long startMs = millis();
-	//uint8_t cmd[2] = {0x00, unit};
-	//if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
-	//	return false;
-	//}
+	uint8_t cmd[2] = {0x00, unit};
+	if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
+		return false;
+	}
 	while (true) {
 		if (!i2cReadBytes(addr, buf, len)) {
 			return false;
 		}
-		if (buf[2] <= 12) {
+		if (buf[2] == 0) {
 			return true;
 		}
 		if (static_cast<uint16_t>(millis() - startMs) >= timeoutMs) {
@@ -405,7 +401,7 @@ static void runContinuousRangingAll() {
 			if (!readRangingWithPoll(addr, unit, buf, sizeof(buf))) {
 				continue;
 			}
-			uint16_t distance = resolveDistance(readU16Be(buf, 0), buf[2]);
+			uint16_t distance = readU16Be(buf, 0);
 			Serial.print(F("#"));
 			Serial.print(++sampleIndex);
 			Serial.print(F(" 0x"));
@@ -737,7 +733,7 @@ static bool readRangingResultWithPoll(uint8_t addr, uint8_t *buf, uint8_t len) {
 		if (!i2cReadBytes(addr, buf, len)) {
 			return false;
 		}
-		if (buf[2] <= 12) {
+		if (buf[2] == 0) {
 			return true;
 		}
 		if (static_cast<uint16_t>(millis() - startMs) >= timeoutMs) {
@@ -850,7 +846,7 @@ void loop() {
 	if (commandSent && readRangingResultWithPoll(addr, previousRangingData, sizeof(previousRangingData))) {
 		previousDeviceIndex = deviceIndex;
 		previousAddress = addr;
-		previousDistance = resolveDistance(readU16Be(previousRangingData, 0), previousRangingData[2]);
+		previousDistance = readU16Be(previousRangingData, 0);
 		previousRangeStatus = previousRangingData[2];
 		hasPreviousRangingData = true;
 	}
@@ -860,3 +856,4 @@ void loop() {
 }
 
 #endif // SETUP_RANGING
+
