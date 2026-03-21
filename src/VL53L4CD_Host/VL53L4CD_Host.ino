@@ -763,7 +763,7 @@ static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
 	}
 	return i2cReadBytes(addr, cfg, len);
 }
-
+#define SETUP_RANGING
 #ifdef SETUP_RANGING
 // ============================================================================
 // Setup and Loop (State Machine Implementation)
