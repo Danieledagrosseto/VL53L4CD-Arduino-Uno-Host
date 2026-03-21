@@ -682,38 +682,6 @@ static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t re
 	}
 }
 
-// ============================================================================
-// Setup and Loop (State Machine Implementation)
-// ============================================================================
-
-void setup() {
-	Serial.begin(115200);
-	unsigned long power_up_start = millis();
-	while (millis() - power_up_start < 5000) {
-		serialEventRun();
-	}
-	Wire.begin();
-	Wire.setClock(400000);
-	
-	// Scan for all I2C devices
-	Serial.println(F("Scanning for I2C slave devices..."));
-	scanI2cAddresses();
-	if (g_num_devices > 0) {
-		g_dev_address = g_detected_devices[0];
-		Serial.print(F("Default device set to: 0x"));
-		Serial.println(g_dev_address, HEX);
-	} else {
-		Serial.println(F("No I2C devices detected. Please connect VL53L4CD."));
-	}
-	
-	g_state = STATE_IDLE;
-	unsigned long menu_start = millis();
-	while (millis() - menu_start < 500) {
-		serialEventRun();
-	}
-	printCommandMenu();
-}
-
 // Helper: Read a line from serial (waits up to 30 seconds for input)
 // Relies on serialEventRun() to populate g_rx_buffer
 static uint8_t readLine(char *buffer, uint8_t max_len) {
@@ -759,6 +727,74 @@ static bool parseU16(const char *str, uint16_t min_val, uint16_t max_val, uint16
 	
 	*out = (uint16_t)val;
 	return true;
+}
+
+// Read a big-endian signed 16-bit value from a byte buffer.
+static int16_t readS16Be(const uint8_t *buf, uint8_t msbIndex) {
+	return static_cast<int16_t>(readU16Be(buf, msbIndex));
+}
+
+// Maximum measurable distance reported for out-of-range errors.
+static const uint16_t RANGING_MAX_DISTANCE_MM = 1300;
+
+// Map a range-status byte to an effective distance.
+static uint16_t resolveDistance(uint16_t rawDistance, uint8_t status) {
+	switch (status) {
+		case 0: case 1: case 2: case 6:
+			return rawDistance;
+		case 3:
+			return 0;
+		case 4: case 7: case 12:
+			return RANGING_MAX_DISTANCE_MM;
+		default:
+			return 0;
+	}
+}
+
+// Request the sensor configuration block and read it into cfg (13 bytes).
+static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
+	const uint8_t cmd = CMD_GET_CONFIG;
+	if (!i2cWriteBytes(addr, &cmd, 1)) {
+		return false;
+	}
+	unsigned long start = millis();
+	while (millis() - start < 50) {
+		serialEventRun();
+	}
+	return i2cReadBytes(addr, cfg, len);
+}
+
+#ifdef SETUP_RANGING
+// ============================================================================
+// Setup and Loop (State Machine Implementation)
+// ============================================================================
+
+void setup() {
+	Serial.begin(115200);
+	unsigned long power_up_start = millis();
+	while (millis() - power_up_start < 5000) {
+		serialEventRun();
+	}
+	Wire.begin();
+	Wire.setClock(400000);
+	
+	// Scan for all I2C devices
+	Serial.println(F("Scanning for I2C slave devices..."));
+	scanI2cAddresses();
+	if (g_num_devices > 0) {
+		g_dev_address = g_detected_devices[0];
+		Serial.print(F("Default device set to: 0x"));
+		Serial.println(g_dev_address, HEX);
+	} else {
+		Serial.println(F("No I2C devices detected. Please connect VL53L4CD."));
+	}
+	
+	g_state = STATE_IDLE;
+	unsigned long menu_start = millis();
+	while (millis() - menu_start < 500) {
+		serialEventRun();
+	}
+	printCommandMenu();
 }
 
 void loop() {
