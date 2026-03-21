@@ -32,7 +32,7 @@ static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
 		return false;
 	}
 	// Give the sensor time to prepare the response.
-	delay(10);
+	delay(50);
 	return i2cReadBytes(addr, cfg, len);
 }
 
@@ -313,13 +313,14 @@ static void printRangingResult(const uint8_t *buf, uint8_t len) {
 
 // Send a ranging command and poll until range status is ready or timeout.
 static bool readRangingWithPoll(uint8_t addr, uint8_t unit, uint8_t *buf, uint8_t len) {
-	const uint16_t pollIntervalMs = 5;
-	const uint16_t timeoutMs = 20;
+	const uint16_t pollIntervalMs = 10;
+	const uint16_t timeoutMs = 30;
 	const unsigned long startMs = millis();
 	//uint8_t cmd[2] = {0x00, unit};
 	//if (!i2cWriteBytes(addr, cmd, sizeof(cmd))) {
 	//	return false;
 	//}
+	delay(pollIntervalMs);
 	while (true) {
 		if (!i2cReadBytes(addr, buf, len)) {
 			return false;
@@ -484,6 +485,14 @@ static void runSetTiming() {
 		return;
 	}
 	Serial.println(F("Device restarted."));
+
+	// Prime the config read path after restart so the next manual read
+	// returns the newly applied values on the first attempt.
+	delay(60);
+	uint8_t cfgWarmup[13] = {0};
+	if (!readConfig(addr, cfgWarmup, sizeof(cfgWarmup))) {
+		Serial.println(F("Warning: post-restart config warm-up failed."));
+	}
 }
 
 // Start an offset calibration with user-provided target distance.
