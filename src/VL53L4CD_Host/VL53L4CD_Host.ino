@@ -427,6 +427,19 @@ static void printCommandMenu(void) {
 	Serial.print(F("Enter command number: "));
 }
 
+// Get selected device time budget in ms from saved params.
+static uint8_t getSelectedDeviceTimeBudgetMs(uint8_t dev_address) {
+	const uint8_t fallback_time_budget_ms = 20;
+
+	for (uint8_t i = 0; i < g_num_devices; ++i) {
+		if (g_saved_ranging_params[i].valid && g_saved_ranging_params[i].address == dev_address) {
+			return (g_saved_ranging_params[i].time_budget_ms == 0) ? fallback_time_budget_ms : g_saved_ranging_params[i].time_budget_ms;
+		}
+	}
+
+	return fallback_time_budget_ms;
+}
+
 // Execute ranging command
 static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 	Command range_cmd;
@@ -440,14 +453,15 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 		return;
 	}
 	
-	// Give device time to process command
+	// Wait exactly the selected device time budget before reading result.
+	uint8_t time_budget_ms = getSelectedDeviceTimeBudgetMs(dev_address);
 	unsigned long start = millis();
-	while (millis() - start < 20) {
+	while (millis() - start < time_budget_ms) {
 		serialEventRun();
 	}
 	uint8_t range_data[15] = {0};
 	uint32_t attempts = 0;
-	const uint32_t max_attempts = 100;
+	const uint32_t max_attempts = 4;  // Total of 40ms max wait (4 attempts * 10ms delay)
 	
 	while (attempts < max_attempts) 	{
 		unsigned long loop_start = millis();
@@ -524,7 +538,7 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 	
 	// Poll all devices until all have valid data
 	uint32_t attempts = 0;
-	const uint32_t max_attempts = 100;
+	const uint32_t max_attempts = 4;  // Total of 40ms max wait (4 attempts * 10ms delay)
 	
 	while (attempts < max_attempts) {
 		bool all_valid = true;
