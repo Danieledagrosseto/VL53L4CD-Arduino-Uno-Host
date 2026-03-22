@@ -470,14 +470,17 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 		}
 		if (i2cReadBytes(dev_address, range_data, sizeof(range_data))) {
 			uint8_t status = range_data[2];
-			if (status == 0x00) {
-				uint16_t distance = readU16Be(range_data, 0);
+			if (status <= 12) {
+				uint16_t raw_distance = readU16Be(range_data, 0);
+				uint16_t distance = resolveDistance(raw_distance, status);
 				uint16_t signal = readU16Be(range_data, 3);
 				uint16_t ambient = readU16Be(range_data, 5);
 				uint16_t sigma = readU16Be(range_data, 7);
 				
 				Serial.print(F("Distance: "));
 				Serial.print(distance);
+				Serial.print(F(" | Status: "));
+				Serial.print(status);
 				Serial.print(F(" | Signal: "));
 				Serial.print(signal);
 				Serial.print(F(" | Ambient: "));
@@ -490,7 +493,13 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 		attempts++;
 	}
 	
-	Serial.println(F("Timeout: No valid data"));
+	const uint8_t timeout_status = 255;
+	uint16_t distance = resolveDistance(0, timeout_status);
+	Serial.print(F("Distance: "));
+	Serial.print(distance);
+	Serial.print(F(" | Status: "));
+	Serial.print(timeout_status);
+	Serial.println(F(" | Timeout"));
 }
 
 // Execute ranging command on all detected devices simultaneously
@@ -546,7 +555,7 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 			if (!data_valid[i]) {
 				if (i2cReadBytes(g_detected_devices[i], device_data[i], 15)) {
 					uint8_t status = device_data[i][2];
-					if (status == 0x00) {
+					if (status <= 12) {
 						data_valid[i] = true;
 					}
 				}
@@ -574,7 +583,9 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 		Serial.print(F(": "));
 		
 		if (data_valid[i]) {
-			uint16_t distance = readU16Be(device_data[i], 0);
+			uint8_t status = device_data[i][2];
+			uint16_t raw_distance = readU16Be(device_data[i], 0);
+			uint16_t distance = resolveDistance(raw_distance, status);
 			uint16_t signal = readU16Be(device_data[i], 3);
 			uint16_t ambient = readU16Be(device_data[i], 5);
 			uint16_t sigma = readU16Be(device_data[i], 7);
@@ -582,6 +593,8 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 			Serial.print(distance);
 			Serial.print(F(" "));
 			Serial.print(unitLabel(units));
+			Serial.print(F(" | Status: "));
+			Serial.print(status);
 			Serial.print(F(" | Signal: "));
 			Serial.print(signal);
 			Serial.print(F(" | Ambient: "));
@@ -589,7 +602,14 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 			Serial.print(F(" | Sigma: "));
 			Serial.println(sigma);
 		} else {
-			Serial.println(F("Timeout - No valid data"));
+			const uint8_t timeout_status = 255;
+			uint16_t distance = resolveDistance(0, timeout_status);
+			Serial.print(distance);
+			Serial.print(F(" "));
+			Serial.print(unitLabel(units));
+			Serial.print(F(" | Status: "));
+			Serial.print(timeout_status);
+			Serial.println(F(" | Timeout"));
 		}
 	}
 	Serial.println();
@@ -661,7 +681,7 @@ static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t re
 					if (!data_valid[i]) {
 						if (i2cReadBytes(g_detected_devices[i], device_data[i], 15)) {
 							uint8_t status = device_data[i][2];
-							if (status == 0x00) {
+							if (status <= 12) {
 								data_valid[i] = true;
 							}
 						}
@@ -688,7 +708,9 @@ static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t re
 				Serial.print(F(": "));
 				
 				if (data_valid[i]) {
-					uint16_t distance = readU16Be(device_data[i], 0);
+					uint8_t status = device_data[i][2];
+					uint16_t raw_distance = readU16Be(device_data[i], 0);
+					uint16_t distance = resolveDistance(raw_distance, status);
 					uint16_t signal = readU16Be(device_data[i], 3);
 					uint16_t ambient = readU16Be(device_data[i], 5);
 					uint16_t sigma = readU16Be(device_data[i], 7);
@@ -696,6 +718,8 @@ static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t re
 					Serial.print(distance);
 					Serial.print(F(" "));
 					Serial.print(unitLabel(units));
+					Serial.print(F(" | St: "));
+					Serial.print(status);
 					Serial.print(F(" | Sig: "));
 					Serial.print(signal);
 					Serial.print(F(" | Amb: "));
@@ -703,7 +727,14 @@ static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t re
 					Serial.print(F(" | Sig: "));
 					Serial.println(sigma);
 				} else {
-					Serial.println(F("No data"));
+					const uint8_t timeout_status = 255;
+					uint16_t distance = resolveDistance(0, timeout_status);
+					Serial.print(distance);
+					Serial.print(F(" "));
+					Serial.print(unitLabel(units));
+					Serial.print(F(" | St: "));
+					Serial.print(timeout_status);
+					Serial.println(F(" | Timeout"));
 				}
 			}
 			
@@ -777,7 +808,7 @@ static uint16_t resolveDistance(uint16_t rawDistance, uint8_t status) {
 		case 4: case 7: case 12:
 			return RANGING_MAX_DISTANCE_MM;
 		default:
-			return 0;
+			return 0xFFFF;
 	}
 }
 
