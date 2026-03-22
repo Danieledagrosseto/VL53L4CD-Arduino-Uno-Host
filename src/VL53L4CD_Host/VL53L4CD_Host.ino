@@ -433,7 +433,7 @@ static void executeRangingCommand(uint8_t dev_address, uint8_t units) {
 	uint32_t attempts = 0;
 	const uint32_t max_attempts = 100;
 	
-	while (attempts < max_attempts) {
+	while (attempts < max_attempts) 	{
 		unsigned long loop_start = millis();
 		while (millis() - loop_start < 10) {
 			serialEventRun();
