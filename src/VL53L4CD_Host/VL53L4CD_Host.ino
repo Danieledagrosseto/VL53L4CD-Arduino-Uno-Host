@@ -100,6 +100,22 @@ bool g_delay_active = false;
 uint8_t g_detected_devices[MAX_I2C_DEVICES] = {0};
 uint8_t g_num_devices = 0;
 
+// Cached ranging parameters for each detected device (setup mode)
+typedef struct {
+	bool valid;
+	uint8_t address;
+	uint8_t time_budget_ms;
+	uint16_t intermeasurement_ms;
+	int16_t offset_mm;
+	uint16_t xtalk_kcps;
+	uint16_t sigma_threshold_mm;
+	uint16_t signal_threshold_kcps;
+	uint8_t firmware_rev;
+} SetupRangingParams;
+
+SetupRangingParams g_saved_ranging_params[MAX_I2C_DEVICES] = {0};
+uint8_t g_saved_ranging_params_count = 0;
+
 // UART RX interrupt handler
 void serialEventRun(void) {
 	while (Serial.available()) {
@@ -763,6 +779,99 @@ static bool readConfig(uint8_t addr, uint8_t *cfg, uint8_t len) {
 	}
 	return i2cReadBytes(addr, cfg, len);
 }
+
+// Read and store ranging parameters for every detected device.
+static void saveDetectedDeviceRangingParameters(void) {
+	g_saved_ranging_params_count = 0;
+	memset(g_saved_ranging_params, 0, sizeof(g_saved_ranging_params));
+
+	if (g_num_devices == 0) {
+		Serial.println(F("No detected devices. Skipping ranging parameter save."));
+		return;
+	}
+
+	Serial.println(F("Reading ranging parameters for detected devices..."));
+	for (uint8_t i = 0; i < g_num_devices; ++i) {
+		uint8_t cfg[13] = {0};
+		const uint8_t addr = g_detected_devices[i];
+		if (!readConfig(addr, cfg, sizeof(cfg))) {
+			Serial.print(F("Failed to read parameters from 0x"));
+			Serial.println(addr, HEX);
+			continue;
+		}
+
+		SetupRangingParams &params = g_saved_ranging_params[i];
+		params.valid = true;
+		params.address = addr;
+		params.time_budget_ms = cfg[1];
+		params.intermeasurement_ms = readU16Be(cfg, 2);
+		params.offset_mm = static_cast<int16_t>(readU16Be(cfg, 4));
+		params.xtalk_kcps = readU16Be(cfg, 6);
+		params.sigma_threshold_mm = readU16Be(cfg, 8);
+		params.signal_threshold_kcps = readU16Be(cfg, 10);
+		params.firmware_rev = cfg[12];
+		g_saved_ranging_params_count++;
+
+		Serial.print(F("Saved ranging parameters for 0x"));
+		Serial.println(addr, HEX);
+	}
+
+	Serial.print(F("Saved parameter blocks: "));
+	Serial.println(g_saved_ranging_params_count);
+}
+
+static void printCell(const char *text, uint8_t width) {
+	if (text == NULL) {
+		text = "";
+	}
+	Serial.print(text);
+	uint8_t len = strlen(text);
+	while (len < width) {
+		Serial.print(' ');
+		len++;
+	}
+}
+
+// Print a table of cached ranging parameters for detected devices.
+static void printSavedRangingParametersTable(void) {
+	if (g_num_devices == 0) {
+		Serial.println(F("No devices detected. Parameter table is empty."));
+		return;
+	}
+
+	Serial.println(F("\n=== Device Ranging Parameters ==="));
+	Serial.println(F("Addr  TB    IM(ms)  Offset   XTALK   Sigma   Signal  FW"));
+	Serial.println(F("----  ----  ------  -------  ------  ------  ------  --"));
+
+	for (uint8_t i = 0; i < g_num_devices; ++i) {
+		const SetupRangingParams &params = g_saved_ranging_params[i];
+		char cell[16] = {0};
+		snprintf(cell, sizeof(cell), "0x%02X", g_detected_devices[i]);
+		printCell(cell, 6);
+
+		if (!params.valid) {
+			Serial.println(F("READ_FAIL"));
+			continue;
+		}
+
+		snprintf(cell, sizeof(cell), "%u", params.time_budget_ms);
+		printCell(cell, 6);
+		snprintf(cell, sizeof(cell), "%u", params.intermeasurement_ms);
+		printCell(cell, 8);
+		snprintf(cell, sizeof(cell), "%d", params.offset_mm);
+		printCell(cell, 9);
+		snprintf(cell, sizeof(cell), "%u", params.xtalk_kcps);
+		printCell(cell, 8);
+		snprintf(cell, sizeof(cell), "%u", params.sigma_threshold_mm);
+		printCell(cell, 8);
+		snprintf(cell, sizeof(cell), "%u", params.signal_threshold_kcps);
+		printCell(cell, 8);
+		snprintf(cell, sizeof(cell), "%u", params.firmware_rev);
+		Serial.println(cell);
+	}
+
+	Serial.println(F("----------------------------------------------------------"));
+}
 #define SETUP_RANGING
 #ifdef SETUP_RANGING
 // ============================================================================
@@ -781,6 +890,8 @@ void setup() {
 	// Scan for all I2C devices
 	Serial.println(F("Scanning for I2C slave devices..."));
 	scanI2cAddresses();
+	saveDetectedDeviceRangingParameters();
+	printSavedRangingParametersTable();
 	if (g_num_devices > 0) {
 		g_dev_address = g_detected_devices[0];
 		Serial.print(F("Default device set to: 0x"));
