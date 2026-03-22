@@ -534,9 +534,14 @@ static void executeRangingCommandAllDevices(uint8_t units) {
 		return;
 	}
 	
-	// Wait for initial processing
+	// Wait for the longest device time budget across all detected devices
+	uint16_t max_budget_ms = 0;
+	for (uint8_t i = 0; i < g_num_devices; i++) {
+		uint16_t budget = getSelectedDeviceTimeBudgetMs(g_detected_devices[i]);
+		if (budget > max_budget_ms) max_budget_ms = budget;
+	}
 	unsigned long start = millis();
-	while (millis() - start < 20) {
+	while (millis() - start < max_budget_ms) {
 		serialEventRun();
 	}
 	
@@ -660,9 +665,14 @@ static void executeRangingCommandAllDevicesContinuous(uint8_t units, uint16_t re
 				sendCommandI2c(&range_cmd);
 			}
 			
-			// Wait for initial processing (longer wait for multiple devices)
+			// Wait for the longest device time budget across all detected devices
+			uint16_t max_budget_ms = 0;
+			for (uint8_t i = 0; i < g_num_devices; i++) {
+				uint16_t budget = getSelectedDeviceTimeBudgetMs(g_detected_devices[i]);
+				if (budget > max_budget_ms) max_budget_ms = budget;
+			}
 			unsigned long cmd_start = millis();
-			while (millis() - cmd_start < 50) {
+			while (millis() - cmd_start < max_budget_ms) {
 				serialEventRun();
 			}
 			
