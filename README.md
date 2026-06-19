@@ -1,4 +1,4 @@
-# Arduino Uno Template Workspace
+# VL53L4CD Breakout
 
 This workspace provides an Arduino Uno host sketch for the VL53L4CD breakout board and VS Code tasks or Arduino UNO IDE.
 
